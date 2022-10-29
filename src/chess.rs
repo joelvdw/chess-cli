@@ -398,8 +398,11 @@ impl Board {
         .filter_map(|(dx, dy)| {
             let x = i as i32 + dx;
             let y = j as i32 + dy;
-            self.is_inside(x, y);
-            Some((x as usize, y as usize))
+            if self.is_inside(x, y) {
+                Some((x as usize, y as usize))
+            } else {
+                None
+            }
         })
         .map(|(x, y)| Move { from: (i, j), to: (x, y) })
         .collect()
