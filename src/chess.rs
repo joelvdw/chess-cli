@@ -41,9 +41,10 @@ pub enum MoveOk {
 }
 
 #[derive(Copy, Clone, PartialEq)]
-pub enum Check {
-    Check,
-    Checkmate,
+pub enum GameState {
+    Check(Color), // Contains the player color who did the check
+    Checkmate(Color), // Contains the winner player color
+    Draw,
     No
 }
 
@@ -55,9 +56,15 @@ pub struct Move {
 
 #[derive(Clone)]
 pub struct Board {
-    data: [[Case; 8]; 8],
-    check_state: Check,
+    data: [[Case; 8]; 8], // The board always must be square
+    check_state: GameState,
     last_move: Option<Move>
+}
+
+impl Color {
+    pub fn invert(self) -> Self {
+      if self == Color::White { Color::Black } else { Color::White }
+    }
 }
 
 impl Move {
@@ -90,7 +97,7 @@ impl Board {
     #[allow(dead_code)]
     pub fn empty() -> Board {
         let data = [(); 8].map(|_| [(); 8].map(|_| None));
-        Board { data, check_state: Check::No, last_move: None }
+        Board { data, check_state: GameState::No, last_move: None }
     }
 
     pub fn new() -> Board {
@@ -105,7 +112,7 @@ impl Board {
             [(); 8].map(|_| Some(Piece { symbol: Symbol::Pawn, color: Color::White, has_moved: false })),
             symbols.map(|s| Some(Piece { symbol: s, color: Color::White, has_moved: false }))
         ];
-        Board { data, check_state: Check::No, last_move: None }
+        Board { data, check_state: GameState::No, last_move: None }
     }
 }
 // Board methods
@@ -190,8 +197,9 @@ impl Board {
 
             let valid = MoveOk::Castling { king: movement.from, rook: (movement.from.0, rook) };
             // King must not be in check in transition or final position
-            if self.is_move_check(Move { from: movement.from, to: (movement.from.0, (movement.from.1 as i32 + (dy/2)) as usize) }, &MoveOk::Move)
-                    || self.is_move_check(movement, &valid) {
+            let trans_move = Move { from: movement.from, to: (movement.from.0, (movement.from.1 as i32 + (dy/2)) as usize) };
+            if self.is_move_check(trans_move, &MoveOk::Move, piece.color.invert())
+                    || self.is_move_check(movement, &valid, piece.color.invert()) {
                 return Err(MoveErr::InvalidMove)
             }
             
@@ -216,7 +224,7 @@ impl Board {
 
             // A king cannot move into check position
             if let Ok(move_type) = res.as_ref() {
-                if self.is_move_check(movement, move_type) {
+                if self.is_move_check(movement, move_type, piece.color.invert()) {
                     Err(MoveErr::KingCheck)
                 } else {
                     res
@@ -313,15 +321,144 @@ impl Board {
         }
     }
 
-    fn is_move_check(&self, movement: Move, move_type: &MoveOk) -> bool {
+    /**
+     * Test if a move would create a check on next turn
+     * `player` is the player that could do a check with the move
+     */
+    fn is_move_check(&self, movement: Move, move_type: &MoveOk, player: Color) -> bool {
         let mut b = self.clone();
-        b.do_move(movement, move_type);
+        b.do_move(movement, move_type, player);
         
-        b.check_state != Check::No
+        b.check_state != GameState::No
     }
 
-    fn is_check(&self) -> Check {
-        Check::No // TODO !!
+    /**
+     * Test if coordinates are inside the board
+     */
+    fn is_inside(&self, i: i32, j: i32) -> bool {
+        0 < i && i < self.data.len() as i32 && 0 < j && j < self.data[0].len() as i32
+    }
+
+    /**
+     * Get all possible moves for a piece in the given position
+     * Does not take into account the state of the board and other pieces
+     */
+    fn possible_moves(&self, piece: &Piece, i: usize, j: usize) -> Vec<Move> {
+        use Symbol::*;
+        let mut ids: Vec<(i32, i32)> = Vec::with_capacity(64);
+        match piece {
+            Piece { symbol: Pawn, color, has_moved } => {
+                let dir = if *color == Color::White { -1 } else { 1 };
+                ids.extend([(dir, 0), (dir, -1), (dir, 1)]);
+                if !has_moved {
+                    ids.push((2*dir, 0));
+                }
+            },
+            Piece { symbol: Knight, .. } => {
+                for m in [-2, 2] {
+                    for n in [-1, 1] {
+                        ids.push((m, n));
+                        ids.push((n, m));
+                    }
+                }
+            },
+            Piece { symbol: Rook, .. } => {
+                for m in 1..(self.data.len() as i32) {
+                    ids.extend([(-m, 0), (m, 0), (0, -m), (0, m)]);
+                }
+            },
+            Piece { symbol: Bishop, .. } => {
+                for m in 1..(self.data.len() as i32) {
+                    ids.extend([(-m, -m), (m, -m), (m, -m), (m, m)]);
+                }
+            },
+            Piece { symbol: Queen, .. } => {
+                for m in 1..(self.data.len() as i32) {
+                    ids.extend([(-m, 0), (m, 0), (0, -m), (0, m)]);
+                    ids.extend([(-m, -m), (m, -m), (m, -m), (m, m)]);
+                }
+            },
+            Piece { symbol: King, .. } => {
+                for m in [-1, 0, 1] {
+                    for n in [-1, 0, 1] {
+                        if m != 0 || n != 0 {
+                            ids.push((m, n));
+                        }
+                    }
+                }
+                // Castling
+                if !piece.has_moved {
+                    ids.extend([(0, -2), (0, 2)]);
+                }
+            }
+        }
+
+        // Convert deplacement into absolute indices and verify its inside the board
+        ids.iter()
+        .filter_map(|(dx, dy)| {
+            let x = i as i32 + dx;
+            let y = j as i32 + dy;
+            self.is_inside(x, y);
+            Some((x as usize, y as usize))
+        })
+        .map(|(x, y)| Move { from: (i, j), to: (x, y) })
+        .collect()
+    }
+
+    /**
+     * Calculate all valid moves for the player on the current board
+     */
+    pub fn all_moves(&self, player: Color) -> Vec<(Move, MoveOk)> {
+        let mut moves = Vec::with_capacity(50);
+        for i in 0..self.data.len() {
+            for j in 0..self.data[0].len() {
+                match &self.data[i][j] {
+                    Some(piece) if piece.color == player => 
+                        moves.extend(self.possible_moves(piece, i, j).iter().filter_map(|m| {
+                            match self.is_move_valid(*m, player) {
+                                Ok(t) => Some((*m, t)),
+                                Err(_) => None
+                            }
+                        })),
+                    _ => {}
+                }
+            }
+        }
+
+        println!("Moves len: {}", moves.len());
+        moves
+    }
+
+    fn is_draw(&self, next_player: Color) -> bool {
+        if self.check_state == GameState::Draw {
+            return true;
+        }
+        // Stalemate (no legal move and not in check)
+        if self.check_state == GameState::No && self.all_moves(next_player).len() == 0 {
+            return true;
+        }
+
+        false
+    }
+
+    /**
+     * Test if a player is in check
+     * `player` is the player that could do a check
+     */
+    fn is_check(&self, player: Color) -> GameState {
+        let check_moves = self.all_moves(player);
+        let check = check_moves.iter().any(|x| self.is_move_check(x.0, &x.1, player));
+
+        if check {
+            let mate = self.all_moves(player.invert()).iter().all(|x| self.is_move_check(x.0, &x.1, player));
+            if mate {
+                GameState::Checkmate(player)
+            } else {
+                GameState::Check(player)
+            }
+        } else {
+            GameState::No
+        }
     }
 
     fn set_move(&mut self, case: (usize, usize)) {
@@ -332,7 +469,11 @@ impl Board {
         }
     }
 
-    fn do_move(&mut self, movement: Move, move_type: &MoveOk) {
+    /**
+     * Actually apply a move on the board
+     * `player` is the player that could do a check with the move
+     */
+    fn do_move(&mut self, movement: Move, move_type: &MoveOk, player: Color) {
         match move_type {
             MoveOk::Move |
             MoveOk::Promote => {
@@ -359,13 +500,16 @@ impl Board {
             }
         }
 
-        self.check_state = self.is_check();
+        self.check_state = self.is_check(player);
+        if self.is_draw(player.invert()) {
+            self.check_state = GameState::Draw;
+        }
         self.last_move = Some(movement);
     }
 
     pub fn apply(&mut self, movement: Move, player: Color) -> Result<MoveOk, MoveErr> {
         let res = self.is_move_valid(movement, player)?;
-        self.do_move(movement, &res);
+        self.do_move(movement, &res, player);
 
         Ok(res)
     }

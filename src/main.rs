@@ -15,6 +15,8 @@ fn game_loop(mut board: Board) {
         white_turn = !white_turn;
         let _ = io::stdin().read(&mut [0u8]).unwrap();
     }
+
+    // TODO: can ask for a draw, and an ok from other player
 }
 
 fn main() {
