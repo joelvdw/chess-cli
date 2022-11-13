@@ -28,9 +28,10 @@ pub enum MoveErr {
     InvalidInput,
     OutOfBound,
     EmptyCase,
-    BadColor,
+    BadColor, // Move piece of other color
     InvalidMove,
-    KingCheck
+    KingCheck, // King moved into check
+    MoveOnCheck // When on check, move that doesn't resolve check
 }
 #[derive(Debug)]
 pub enum MoveOk {
@@ -40,7 +41,7 @@ pub enum MoveOk {
     Castling { king: (usize, usize), rook: (usize, usize) }
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum GameState {
     Check(Color), // Contains the player color who did the check
     Checkmate(Color), // Contains the winner player color
@@ -57,8 +58,8 @@ pub struct Move {
 #[derive(Clone)]
 pub struct Board {
     data: [[Case; 8]; 8], // The board always must be square
-    check_state: GameState,
-    last_move: Option<Move>
+    last_move: Option<Move>,
+    pub check_state: GameState
 }
 
 impl Color {
@@ -327,16 +328,16 @@ impl Board {
      */
     fn is_move_check(&self, movement: Move, move_type: &MoveOk, player: Color) -> bool {
         let mut b = self.clone();
-        b.do_move(movement, move_type, player);
+        b.do_move(movement, move_type);
         
-        b.check_state != GameState::No
+        b.is_check(player)
     }
 
     /**
      * Test if coordinates are inside the board
      */
     fn is_inside(&self, i: i32, j: i32) -> bool {
-        0 < i && i < self.data.len() as i32 && 0 < j && j < self.data[0].len() as i32
+        0 <= i && i < self.data.len() as i32 && 0 <= j && j < self.data[0].len() as i32
     }
 
     /**
@@ -428,19 +429,76 @@ impl Board {
             }
         }
 
-        println!("Moves len: {}", moves.len());
         moves
     }
 
-    fn is_draw(&self, next_player: Color) -> bool {
-        if self.check_state == GameState::Draw {
-            return true;
+    fn find_king(&self, player: Color) -> (usize, usize) {
+        for i in 0..self.data.len() {
+            for j in 0..self.data[0].len() {
+                match self.data[i][j] {
+                    Some(Piece { symbol: Symbol::King, color, .. }) if color == player => return (i, j),
+                    _ => {}
+                }
+            }
         }
-        // Stalemate (no legal move and not in check)
-        if self.check_state == GameState::No && self.all_moves(next_player).len() == 0 {
-            return true;
-        }
+        panic!("Missing king on board");
+    }
 
+    fn test_check_line(&self, player: Color, symbols: Vec<Symbol>, king_pos: (usize, usize), dx: i32, dy: i32) -> bool {
+        let (mut i, mut j) = (king_pos.0 as i32 + dx, king_pos.1 as i32 + dy);
+        while self.is_inside(i, j) {
+            match self.data[i as usize][j as usize] {
+                Some(Piece { symbol, color, .. }) 
+                if color == player && symbols.contains(&symbol) => {
+                    return true;
+                },
+                Some(_) => return false,
+                _ => ()
+            }
+            i += dx;
+            j += dy;
+        }
+        false
+    }
+
+    fn is_piece(&self, i: i32, j: i32, player: Color, symbol: Symbol) -> bool {
+        if self.is_inside(i, j) {
+            match self.data[i as usize][j as usize] {
+                Some(Piece { symbol: s, color, .. }) 
+                if color == player && s == symbol => {
+                    true
+                },
+                _ => false
+            }
+        } else {
+            false
+        }
+    }
+
+    fn test_check_around(&self, player: Color, king_pos: (usize, usize)) -> bool {
+        let (k_i, k_j) = (king_pos.0 as i32, king_pos.1 as i32);
+        for i in [-1, 0, 1] {
+            for j in [-1, 0, 1] {
+                if self.is_piece(k_i+i, k_j+j, player, Symbol::King) {
+                    return true;
+                }
+            }
+        }  
+        false
+    }
+
+    fn test_check_knight(&self, player: Color, king_pos: (usize, usize)) -> bool {
+        let (k_i, k_j) = (king_pos.0 as i32, king_pos.1 as i32);
+        for m in [-2, 2] {
+            for n in [-1, 1] {
+                if self.is_piece(k_i+m, k_j+n, player, Symbol::Knight) {
+                    return true;
+                }
+                if self.is_piece(k_i+n, k_j+m, player, Symbol::Knight) {
+                    return true;
+                }
+            }
+        }  
         false
     }
 
@@ -448,27 +506,57 @@ impl Board {
      * Test if a player is in check
      * `player` is the player that could do a check
      */
-    fn is_check(&self, player: Color) -> GameState {
-        let check_moves = self.all_moves(player);
-        let check = check_moves.iter().any(|x| self.is_move_check(x.0, &x.1, player));
-
-        if check {
-            let mate = self.all_moves(player.invert()).iter().all(|x| self.is_move_check(x.0, &x.1, player));
-            if mate {
-                GameState::Checkmate(player)
-            } else {
-                GameState::Check(player)
-            }
-        } else {
-            GameState::No
+    fn is_check(&self, player: Color) -> bool {
+        let king_pos = self.find_king(player.invert());
+        
+        // Rook/queen
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Rook], king_pos, 0, -1) {
+            return true;
         }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Rook], king_pos, 0, 1) {
+            return true;
+        }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Rook], king_pos, -1, 0) {
+            return true;
+        }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Rook], king_pos, 1, 0) {
+            return true;
+        }
+        // Bishop/queen
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Bishop], king_pos, -1, -1) {
+            return true;
+        }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Bishop], king_pos, -1, 1) {
+            return true;
+        }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Bishop], king_pos, 1, -1) {
+            return true;
+        }
+        if self.test_check_line(player, vec![Symbol::Queen, Symbol::Bishop], king_pos, 1, 1) {
+            return true;
+        }
+        // King
+        if self.test_check_around(player, king_pos) {
+            return true;
+        }
+        // Knight
+        if self.test_check_knight(player, king_pos) {
+            return true;
+        }
+        // Pawn
+        let dx: i32 = if player == Color::White { 1 } else { -1 };
+        if self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 - 1, player, Symbol::Pawn) {
+            return true;
+        } else if self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 + 1, player, Symbol::Pawn) {
+            return true;
+        }
+        false
     }
 
     fn set_move(&mut self, case: (usize, usize)) {
         let case = &mut self.data[case.0][case.1];
-        match case {
-            Some(p) => p.has_moved = true,
-            _ => ()           
+        if let Some(p) = case {
+            p.has_moved = true;
         }
     }
 
@@ -476,7 +564,7 @@ impl Board {
      * Actually apply a move on the board
      * `player` is the player that could do a check with the move
      */
-    fn do_move(&mut self, movement: Move, move_type: &MoveOk, player: Color) {
+    fn do_move(&mut self, movement: Move, move_type: &MoveOk) {
         match move_type {
             MoveOk::Move |
             MoveOk::Promote => {
@@ -502,18 +590,33 @@ impl Board {
                 }
             }
         }
-
-        self.check_state = self.is_check(player);
-        if self.is_draw(player.invert()) {
-            self.check_state = GameState::Draw;
-        }
+        
         self.last_move = Some(movement);
+    }
+
+    fn get_gamestate(&self, player: Color) -> GameState {
+        let next_moves = self.all_moves(player.invert());
+        if self.is_check(player) {
+            let mate = next_moves.iter().all(|x| self.is_move_check(x.0, &x.1, player));
+            if mate {
+                GameState::Checkmate(player.invert())
+            } else {
+                GameState::Check(player.invert())
+            }
+        } else if next_moves.len() == 0 {
+            GameState::Draw
+        } else {
+            GameState::No
+        }
     }
 
     pub fn apply(&mut self, movement: Move, player: Color) -> Result<MoveOk, MoveErr> {
         let res = self.is_move_valid(movement, player)?;
-        self.do_move(movement, &res, player);
-
+        if self.check_state == GameState::Check(player) && self.is_move_check(movement, &res, player.invert()) {
+            return Err(MoveErr::MoveOnCheck);
+        }
+        self.do_move(movement, &res);
+        self.check_state = self.get_gamestate(player);
         Ok(res)
     }
 }
