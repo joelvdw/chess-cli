@@ -1,7 +1,7 @@
-use std::fmt;
+use std::fmt::{self, Display};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Symbol {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Symbol {
     Pawn,
     Knight,
     Bishop,
@@ -9,7 +9,7 @@ enum Symbol {
     Queen,
     King
 }
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Color {
     White,
     Black
@@ -36,15 +36,16 @@ pub enum MoveErr {
 #[derive(Debug)]
 pub enum MoveOk {
     Move,
-    Promote,
+    Promote(usize, usize),
     Capture(usize, usize),
     Castling { king: (usize, usize), rook: (usize, usize) }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum GameState {
-    Check(Color), // Contains the player color who did the check
-    Checkmate(Color), // Contains the winner player color
+    Check(Color), // Contains the losing player color
+    Checkmate(Color), // Contains the losing player color
+    Surrender(Color), // Contains the player who surrender
     Draw,
     No
 }
@@ -65,6 +66,15 @@ pub struct Board {
 impl Color {
     pub fn invert(self) -> Self {
       if self == Color::White { Color::Black } else { Color::White }
+    }
+}
+impl Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Color::White => write!(f, "White")?,
+            Color::Black => write!(f, "Black")?,
+        }
+        Ok(())
     }
 }
 
@@ -151,7 +161,7 @@ impl Board {
         if dx == dir && dy == 0 && c_to.is_none() {
             // Basic move
             if movement.to.0 == end {
-                Ok(MoveOk::Promote)
+                Ok(MoveOk::Promote(movement.to.0, movement.to.1))
             } else {
                 Ok(MoveOk::Move)
             }
@@ -244,8 +254,16 @@ impl Board {
     fn is_linear_move(&self, movement: Move, color: Color, dx: i32, dy: i32, c_to: &Case) -> Result<MoveOk, MoveErr> {
         // Test if the way if free
         for i in 1..(dx.abs().max(dy.abs())) {
-            let ix = if dx < 0 { -i } else if dx > 0 { i } else { 0 };
-            let iy = if dy < 0 { -i } else if dy > 0 { i } else { 0 };
+            let ix = match dx {
+                v if v < 0 => -i,
+                v if v > 0 => i,
+                _ => 0
+            };
+            let iy = match dy {
+                v if v < 0 => -i,
+                v if v > 0 => i,
+                _ => 0
+            };
             if self.data[(movement.from.0 as i32 + ix) as usize][(movement.from.1 as i32 + iy) as usize].is_some() {
                 return Err(MoveErr::InvalidMove);
             }
@@ -463,13 +481,7 @@ impl Board {
 
     fn is_piece(&self, i: i32, j: i32, player: Color, symbol: Symbol) -> bool {
         if self.is_inside(i, j) {
-            match self.data[i as usize][j as usize] {
-                Some(Piece { symbol: s, color, .. }) 
-                if color == player && s == symbol => {
-                    true
-                },
-                _ => false
-            }
+            matches!(self.data[i as usize][j as usize], Some(Piece { symbol: s, color, .. }) if color == player && s == symbol)
         } else {
             false
         }
@@ -545,9 +557,8 @@ impl Board {
         }
         // Pawn
         let dx: i32 = if player == Color::White { 1 } else { -1 };
-        if self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 - 1, player, Symbol::Pawn) {
-            return true;
-        } else if self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 + 1, player, Symbol::Pawn) {
+        if self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 - 1, player, Symbol::Pawn)
+            || self.is_piece(king_pos.0 as i32 + dx, king_pos.1 as i32 + 1, player, Symbol::Pawn) {
             return true;
         }
         false
@@ -567,7 +578,7 @@ impl Board {
     fn do_move(&mut self, movement: Move, move_type: &MoveOk) {
         match move_type {
             MoveOk::Move |
-            MoveOk::Promote => {
+            MoveOk::Promote(_,_) => {
                 self.data[movement.to.0][movement.to.1] = self.data[movement.from.0][movement.from.1].take();
                 self.set_move(movement.to);
             },
@@ -603,7 +614,7 @@ impl Board {
             } else {
                 GameState::Check(player.invert())
             }
-        } else if next_moves.len() == 0 {
+        } else if next_moves.is_empty() {
             GameState::Draw
         } else {
             GameState::No
@@ -618,6 +629,23 @@ impl Board {
         self.do_move(movement, &res);
         self.check_state = self.get_gamestate(player);
         Ok(res)
+    }
+
+    /**
+     * Set draw or surrender game state
+     */
+    pub fn set_gamestate(&mut self, state: GameState) {
+        match state {
+            GameState::Draw | GameState::Surrender(_) => self.check_state = state,
+            _ => ()
+        }
+        
+    }
+
+    pub fn promote(&mut self, x: usize, y: usize, symbol: Symbol) {
+        if let Some(p) = &mut self.data[x][y] {
+            p.symbol = symbol;
+        }
     }
 }
 // Board print methods
@@ -651,9 +679,9 @@ impl Board {
                 };
                 out.push_str(&format!("{c} "));
             }
-            out.push_str(&format!("\n"));
+            out.push('\n');
         }
-        out.push_str(&format!("  A B C D E F G H\n"));
+        out.push_str("  A B C D E F G H\n");
         out
     }
 }
